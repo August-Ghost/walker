@@ -4,6 +4,7 @@ import signal
 import logging
 import parameter
 import cPickle
+from Queue import Empty
 from  threading import active_count, current_thread, enumerate
 from taskpool import TaskPool
 from worker import Worker
@@ -92,6 +93,7 @@ def sys_start(args, resume=False):
     # We have to keep main thread awake ot process signal, but will not let it quit.
     while 1:
         map(lambda w: w.join(1024), workers.itervalues())
+
 
 
 

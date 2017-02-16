@@ -28,7 +28,6 @@ class Worker(threading.Thread):
     Worker_taskpool = None
     Worker_basedomain = None
     Worker_errorpage = None
-    Worker_abortive_instance = Queue()
 
 
     @classmethod
@@ -123,7 +122,6 @@ class Worker(threading.Thread):
             raise Quit()
         else:
             return task
-
 
     def __make_request(self, task):
         """
