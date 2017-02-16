@@ -5,9 +5,16 @@ Process grab task.
 import logging
 import requests
 import threading
-from Queue import Empty
+from Queue import Empty, Queue
 from bs4 import BeautifulSoup as bs
 from url import URL
+
+
+class Quit(Exception):
+    pass
+
+class TaskAbort(Exception):
+    pass
 
 
 class Worker(threading.Thread):
@@ -21,6 +28,8 @@ class Worker(threading.Thread):
     Worker_taskpool = None
     Worker_basedomain = None
     Worker_errorpage = None
+    Worker_abortive_instance = Queue()
+
 
     @classmethod
     def setWorkerConfig(cls, taskpool, basedomain=None, errorpage=None, rootlogger=None):
@@ -93,41 +102,80 @@ class Worker(threading.Thread):
     def __init__(self):
         # Enable HTTP keep-alive feature
         self.__session = requests.session()
-        self.task = None
-        self.__basedomain = Worker.Worker_basedomain
-        self.__taskpool = Worker.Worker_taskpool
-        self.__error_page = Worker.Worker_errorpage
-        self.__soup = None
         self.__response = None
         super(Worker, self).__init__(name=id(self))
 
-    def __request(self):
+    def __get_task(self):
+        try:
+            # While Worker_terminating is set to True,
+            # all workers will stop getting new target link and quit.
+            if not Worker.Worker_terminating:
+                task = Worker.Worker_taskpool.get(timeout=10)
+                Worker.Worker_debug_logger.debug(task)
+            else:
+                raise Quit()
+        except Empty:
+            # If the thread is idle for 10 minutes,
+            # we exist.
+            msg = "Empty task queue. The worker is going to quit."
+            Worker.Worker_sys_logger.info(msg)
+            Worker.Worker_debug_logger.debug(msg)
+            raise Quit()
+        else:
+            return task
+
+
+    def __make_request(self, task):
         """
         Send request to target.
         :return: None
         """
         self.__response = None
         try:
-            self.__response = self.__session.get(self.task)
+            self.__response = self.__session.get(task)
         except requests.exceptions.HTTPError as e:
             # If the remote server return a response with 4xx or 5xx code,
             # requests will raise a HTTPError
                 self.__response = e.response
+        except requests.exceptions.RequestException as e:
+            msg = "{url} - {error}".format(url=task.encode("utf-8"), error=e)
+            Worker.Worker_error_logger.warning(msg)
+            Worker.Worker_debug_logger.warning(msg)
+            raise TaskAbort()
+        except Exception as e:
+            # In case of unexpected errors.
+            msg = "{url} - An unexpected error occurred: {err}".format(url=task.encode("utf-8"), err=e)
+            Worker.Worker_sys_logger.exception(msg)
+            Worker.Worker_debug_logger.exception(msg)
+            raise TaskAbort()
+        else:
+            # If we are redirected to a domain that not in basedomain ,
+            # ignore it.
+            if Worker.Worker_basedomain and URL(self.__response.url).netloc not in Worker.Worker_basedomain:
+                raise TaskAbort()
+            else:
+                # Deal with http errors
+                if 400 <= self.__response.status_code <= 599:
+                    msg = "{url} - {status}".format(url=task.encode("utf-8"),
+                                                    status=self.__response.status_code)
+                    Worker.Worker_error_logger.warning(msg)
+                    Worker.Worker_debug_logger.warning(msg)
+                    raise TaskAbort()
 
-    def __process(self):
+    def __process(self, task):
         """
         Collect urls from the web page.
         """
-        task_url = URL(self.task)
-        self.__soup = bs(self.__response.content, "html.parser")
+        task_url = URL(task)
+        soup = bs(self.__response.content, "html.parser")
         # Get all links from current page.Remove duplicated links.
         url_set = set(item.get("href")
-                      for item in self.__soup.find_all(lambda tag: tag.get("href") and "javascript" not in tag.get("href")))
+                      for item in soup.find_all(lambda tag: tag.get("href") and "javascript" not in tag.get("href")))
         target = set()
         # Construct  new target links
         for item in url_set:
             u = URL(item)
-            if u.netloc and u.netloc not in self.__basedomain:
+            if u.netloc and u.netloc not in Worker.Worker_basedomain:
                 continue
             else:
                 u.standardize(task_url.url)
@@ -144,58 +192,17 @@ class Worker(threading.Thread):
         try:
             while 1:
                 try:
-                    # While Worker_terminating is set to True,
-                    # all workers will stop getting new target link and quit.
-                    if not Worker.Worker_terminating:
-                        self.task = self.__taskpool.get(timeout=10)
-                        Worker.Worker_debug_logger.debug(self.task)
-                    else:
-                        break
-                except Empty:
-                    # If the thread is idle for 10 minutes,
-                    # we exist.
-                    msg = "Empty task queue. The worker is going to quit."
-                    Worker.Worker_sys_logger.info(msg)
-                    Worker.Worker_debug_logger.debug(msg)
+                    task = self.__get_task()
+                except Quit:
                     break
                 else:
                     try:
-                        self.__request()
-                    except requests.exceptions.RequestException as e:
-                        msg = "{url} - {error}".format(url=self.task.encode("utf-8"), error=e)
-                        Worker.Worker_error_logger.warning(msg)
-                        Worker.Worker_debug_logger.warning(msg)
+                        self.__make_request(task=task)
+                    except TaskAbort:
                         continue
-                    except Exception as e:
-                        # In case of unexpected errors.
-                        msg = "{url} - An unexpected error occurred: {err}".format(url=self.task.encode("utf-8"), err=e)
-                        Worker.Worker_sys_logger.exception(msg)
-                        Worker.Worker_debug_logger.exception(msg)
                     else:
-                        # If we are redirected to a domain that not in basedomain ,
-                        # ignore it.
-                        if self.__basedomain and URL(self.__response.url).netloc not in self.__basedomain:
-                            continue
-                        else:
-                            # Deal with http errors
-                            if 400 <= self.__response.status_code <= 599:
-                                msg = "{url} - {status}".format(url=self.task.encode("utf-8"),
-                                                                    status=self.__response.status_code)
-                                Worker.Worker_error_logger.warning(msg)
-                                Worker.Worker_debug_logger.warning(msg)
-                                continue
-                            else:
-                                # Deal with redirected errors
-                                if self.__response.url in self.__error_page:
-                                    msg = "{url} - Be redirected to error page: {error_page}".format(
-                                        url=self.task.encode("utf-8"),
-                                        error_page=self.__response.url)
-                                    Worker.Worker_error_logger.warning(msg)
-                                    Worker.Worker_debug_logger.warning(msg)
-                                    continue
-                                else:
-                                    urls = self.__process()
-                                    self.__taskpool.put(urls)
+                        urls = self.__process(task=task)
+                        Worker.Worker_taskpool.put(urls)
         except Exception as e:
             msg = "unhandled error: {err}".format(err=e)
             Worker.Worker_sys_logger.exception(msg)
