@@ -5,6 +5,7 @@ Process grab task.
 import logging
 import requests
 import threading
+import lxml
 from Queue import Empty, Queue
 from bs4 import BeautifulSoup as bs
 from url import URL
@@ -12,6 +13,7 @@ from url import URL
 
 class Quit(Exception):
     pass
+
 
 class TaskAbort(Exception):
     pass
@@ -165,7 +167,7 @@ class Worker(threading.Thread):
         Collect urls from the web page.
         """
         task_url = URL(task)
-        soup = bs(self.__response.content, "html.parser")
+        soup = bs(self.__response.content, "lxml")
         # Get all links from current page.Remove duplicated links.
         url_set = set(item.get("href")
                       for item in soup.find_all(lambda tag: tag.get("href") and "javascript" not in tag.get("href")))
@@ -205,6 +207,7 @@ class Worker(threading.Thread):
             msg = "unhandled error: {err}".format(err=e)
             Worker.Worker_sys_logger.exception(msg)
             Worker.Worker_debug_logger.exception(msg)
+            Worker.Worker_abortive_instance.put((self, e))
         finally:
             msg = "Worker {name} quit.".format(name=self.name)
             Worker.Worker_sys_logger.info(msg)
