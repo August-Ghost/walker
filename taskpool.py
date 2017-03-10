@@ -12,9 +12,9 @@ except ImportError:
 import cPickle
 
 
-# Almost 1M elements for each slice.
+# Almost 130k elements for each slice.
 # Enlarge it if necessary.
-MAX_FILTER_LEN = 1048575
+MAX_FILTER_LEN = 131071
 
 
 class DistinctFilter(object):
